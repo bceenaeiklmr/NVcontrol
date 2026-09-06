@@ -935,11 +935,15 @@ class TaskbarWidget {
     IsCompact := false
     Controller := ""
 
+    HasCustomPosition := false
+
     /**
      * Initializes widget window geometry and UI controls.
      */
     __New() {
-        this.CalculateGeometry()
+        this.LoadPersistedPosition()
+        if (this.X == 0 && this.Y == 0)
+            this.CalculateGeometry()
         this.BuildGui()
         this.RegisterWindowMessages()
     }
@@ -954,12 +958,23 @@ class TaskbarWidget {
     }
 
     /**
-     * Determines screen taskbar dimensions and centers widget vertically in the primary taskbar.
+     * Determines screen taskbar dimensions and docks widget vertically in the taskbar.
+     * @param {Integer} [targetMon=0] - Target monitor index. 0 defaults to primary.
      */
-    CalculateGeometry() {
-        primaryMon := MonitorGetPrimary()
-        MonitorGet(primaryMon, &sLeft, &sTop, &sRight, &sBottom)
-        MonitorGetWorkArea(primaryMon, &wLeft, &wTop, &wRight, &wBottom)
+    CalculateGeometry(targetMon := 0) {
+        this.DockToMonitor(targetMon)
+    }
+
+    /**
+     * Docks widget inside the taskbar of a specified monitor.
+     * @param {Integer} [monIdx=0] - Monitor index. 0 defaults to primary.
+     */
+    DockToMonitor(monIdx := 0) {
+        if (monIdx <= 0 || monIdx > MonitorGetCount())
+            monIdx := MonitorGetPrimary()
+
+        MonitorGet(monIdx, &sLeft, &sTop, &sRight, &sBottom)
+        MonitorGetWorkArea(monIdx, &wLeft, &wTop, &wRight, &wBottom)
 
         this.WorkBottom := wBottom
         this.TaskbarHeight := sBottom - wBottom
@@ -969,7 +984,7 @@ class TaskbarWidget {
         this.W := this.IsCompact ? 390 : 320
         this.H := this.IsCompact ? 20 : 30
 
-        ; Detect taskbar location on primary monitor and dock cleanly inside it
+        ; Detect taskbar location on target monitor and dock cleanly inside it
         if (sBottom > wBottom) {
             tbHeight := sBottom - wBottom
             this.X := sLeft + 12
@@ -985,9 +1000,33 @@ class TaskbarWidget {
             this.X := sLeft + 12
             this.Y := sBottom - this.H - 8
         }
+    }
 
-        ; Load persisted multi-monitor position if available and visible
-        this.LoadPersistedPosition()
+    /**
+     * Returns the monitor index on which the widget is currently situated.
+     * @returns {Integer} Monitor index.
+     */
+    GetCurrentMonitor() {
+        return TaskbarWidget.GetMonitorFromCoords(this.X, this.Y, this.W, this.H)
+    }
+
+    /**
+     * Identifies which connected monitor encompasses given screen coordinates.
+     * @param {Integer} x - X coordinate.
+     * @param {Integer} y - Y coordinate.
+     * @param {Integer} [w=100] - Width.
+     * @param {Integer} [h=100] - Height.
+     * @returns {Integer} Monitor index.
+     */
+    static GetMonitorFromCoords(x, y, w := 100, h := 100) {
+        midX := x + Round(w / 2)
+        midY := y + Round(h / 2)
+        Loop MonitorGetCount() {
+            MonitorGet(A_Index, &l, &t, &r, &b)
+            if (midX >= l && midX < r && midY >= t && midY < b)
+                return A_Index
+        }
+        return MonitorGetPrimary()
     }
 
     /**
@@ -1018,9 +1057,15 @@ class TaskbarWidget {
             return
 
         try {
+            rawCompact := IniRead(iniPath, "Widget", "Compact", "0")
+            if (rawCompact = "1") {
+                this.IsCompact := true
+                this.W := 390
+                this.H := 20
+            }
+
             rawX := IniRead(iniPath, "Widget", "X", "")
             rawY := IniRead(iniPath, "Widget", "Y", "")
-            rawCompact := IniRead(iniPath, "Widget", "Compact", "0")
             if (rawX != "" && rawY != "") {
                 savedX := Integer(rawX)
                 savedY := Integer(rawY)
@@ -1028,10 +1073,9 @@ class TaskbarWidget {
                 if !(savedX == 0 && savedY == 0) && TaskbarWidget.IsOnScreen(savedX, savedY, this.W, this.H) {
                     this.X := savedX
                     this.Y := savedY
+                    this.HasCustomPosition := true
                 }
             }
-            if (rawCompact = "1")
-                this.IsCompact := true
         }
     }
 
@@ -1082,11 +1126,31 @@ class TaskbarWidget {
         wMenu.Add("Open Controller", (*) => this.OnActivate())
         wMenu.Add("Refresh Stats", (*) => (this.Controller ? this.Controller.RefreshStats() : ""))
         wMenu.Add("Toggle 1-Line / 2-Line", (*) => this.ToggleCompact())
+        if (MonitorGetCount() > 1) {
+            monSub := Menu()
+            Loop MonitorGetCount() {
+                mIdx := A_Index
+                monSub.Add(Format("Monitor {}", mIdx), (*) => this.MoveToMonitor(mIdx))
+            }
+            wMenu.Add("Move to Monitor", monSub)
+        }
         wMenu.Add()
         wMenu.Add("Restore Auto Fans", (*) => (this.Controller ? this.Controller.ResetFansToAuto() : ""))
         wMenu.Add("Hide Taskbar Overlay", (*) => this.Hide())
         wMenu.Add("Exit", (*) => ExitApp())
         this.Gui.OnEvent("ContextMenu", (*) => wMenu.Show())
+    }
+
+    /**
+     * Relocates widget to a designated monitor's taskbar.
+     * @param {Integer} monIdx - Target monitor index.
+     */
+    MoveToMonitor(monIdx) {
+        this.DockToMonitor(monIdx)
+        this.HasCustomPosition := false
+        this.Gui.Move(this.X, this.Y, this.W, this.H)
+        this.SavePersistedPosition()
+        this.Show()
     }
 
     /**
@@ -1115,10 +1179,12 @@ class TaskbarWidget {
      * @param {Integer} hwnd - Window handle that completed sizing/moving.
      */
     OnExitSizeMove(hwnd) {
-        if (this.Gui && hwnd == this.Gui.Hwnd)
+        if (this.Gui && hwnd == this.Gui.Hwnd) {
+            this.HasCustomPosition := true
             this.UpdatePosition(true)
-        else if (this.Controller && this.Controller.Gui && hwnd == this.Controller.Gui.Hwnd)
+        } else if (this.Controller && this.Controller.Gui && hwnd == this.Controller.Gui.Hwnd) {
             this.Controller.SavePosition()
+        }
     }
 
     /**
@@ -1162,9 +1228,12 @@ class TaskbarWidget {
 
     /**
      * Displays the overlay without stealing focus at its exact placed coordinates.
+     * Enforces HWND_TOPMOST in the Win32 Z-order to stay reliably above the Windows Taskbar.
      */
     Show() {
         this.Gui.Show(Format("x{} y{} w{} h{} NoActivate", this.X, this.Y, this.W, this.H))
+        DllCall("SetWindowPos", "Ptr", this.Gui.Hwnd, "Ptr", -1, "Int", this.X, "Int", this.Y, "Int", this.W, "Int", this.H, "UInt", 0x0040 | 0x0010) ; SWP_SHOWWINDOW | SWP_NOACTIVATE
+        WinSetAlwaysOnTop(true, "ahk_id " this.Gui.Hwnd)
     }
 
     /**
@@ -1190,8 +1259,11 @@ class TaskbarWidget {
     Toggle() {
         if this.IsVisible()
             this.Hide()
-        else
+        else {
             this.Show()
+            if this.Controller
+                this.Controller.RefreshStats()
+        }
     }
 
     /**
@@ -1412,8 +1484,13 @@ class NvControlGui {
         this.chkStartup.Value := StartupManager.IsEnabled() ? 1 : 0
         this.chkStartup.OnEvent("Click", (ctrl, *) => this.ToggleStartup(ctrl.Value))
 
+        iniPath := A_AppData "\NVcontrol\geometry.ini"
+        if !FileExist(iniPath)
+            iniPath := A_AppData "\nv-control\geometry.ini"
+        savedShowWidget := "1"
+        try savedShowWidget := IniRead(iniPath, "Window", "ShowWidget", "1")
         this.chkShowWidget := this.Gui.AddCheckbox("x298 yp w185", "Taskbar Mini-Overlay")
-        this.chkShowWidget.Value := 1
+        this.chkShowWidget.Value := (savedShowWidget = "0") ? 0 : 1
         this.chkShowWidget.OnEvent("Click", (ctrl, *) => this.ToggleTaskbarOption(ctrl.Value))
 
         btnRefresh := this.Gui.AddButton("x490 yp-4 w120 h26", "Refresh Now")
@@ -1959,12 +2036,39 @@ class NvControlGui {
     }
 
     /**
-     * Hides widget if option unchecked.
-     * @param {Integer} enable - Checkbox value.
+     * Toggles live taskbar widget visibility and persists preference.
+     * @param {Integer} enable - Checkbox value (1 = enable, 0 = disable).
      */
     ToggleTaskbarOption(enable) {
-        if !enable && this.Widget
+        if (enable && this.Widget) {
+            this.Widget.DockToMonitor(this.GetControllerMonitor())
+            this.Widget.Show()
+            this.RefreshStats()
+        } else if (!enable && this.Widget) {
             this.Widget.Hide()
+        }
+        try {
+            dir := A_AppData "\NVcontrol"
+            if !DirExist(dir)
+                try DirCreate(dir)
+            IniWrite(enable ? "1" : "0", dir "\geometry.ini", "Window", "ShowWidget")
+        }
+    }
+
+    /**
+     * Detects which monitor currently contains the main controller window.
+     * @returns {Integer} Monitor index.
+     */
+    GetControllerMonitor() {
+        if (this.Gui && WinExist("ahk_id " this.Gui.Hwnd)) {
+            try {
+                this.Gui.GetPos(&gx, &gy, &gw, &gh)
+                return TaskbarWidget.GetMonitorFromCoords(gx, gy, gw, gh)
+            }
+        }
+        if (this.LastX != "" && this.LastY != "")
+            return TaskbarWidget.GetMonitorFromCoords(this.LastX, this.LastY, this.GroupWidth, 300)
+        return MonitorGetPrimary()
     }
 
     /**
@@ -1987,9 +2091,14 @@ class NvControlGui {
      */
     MinimizeToTray(completely := false) {
         this.SavePosition()
+        curMon := this.GetControllerMonitor()
         this.Gui.Hide()
         if (!completely && this.chkShowWidget.Value && this.Widget) {
+            ; Ensure widget docks to the monitor where the controller window was minimized from
+            if (!this.Widget.HasCustomPosition || this.Widget.GetCurrentMonitor() != curMon)
+                this.Widget.DockToMonitor(curMon)
             this.Widget.Show()
+            this.RefreshStats()
         } else if this.Widget {
             this.Widget.Hide()
         }
@@ -2003,10 +2112,11 @@ class NvControlGui {
         if this.Widget
             this.Widget.Hide()
         if (this.LastX != "" && this.LastY != "")
-            this.Gui.Show(Format("x{} y{}", this.LastX, this.LastY))
+            this.Gui.Show(Format("x{} y{} w{}", this.LastX, this.LastY, this.GroupWidth + 36))
         else
-            this.Gui.Show()
+            this.Gui.Show(Format("w{}", this.GroupWidth + 36))
         WinActivate("ahk_id " this.Gui.Hwnd)
+        this.RefreshStats()
     }
 
     /**
