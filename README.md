@@ -28,7 +28,7 @@ Afterburner was great a decade ago, but today it is bloated and slow. Between Af
 
 I wanted something clean, simple, and genuinely lightweight:
 * **No bloat**: Sits at **~3.2 MB RAM** on launch and drops to **~1.5–3 MB** when minimized.
-* **Direct NVML communication**: Zero CMD console flashing, zero `nvidia-smi` process spawning, zero temporary files. Telemetry reads in **< 0.1 milliseconds** straight from driver memory.
+* **Direct NVML communication**: Zero CMD console flashing, `nvidia-smi` process spawning and temporary files. Telemetry reads in straight from driver memory.
 * **A clean Taskbar Widget**: A live mini-telemetry widget docked cleanly into the empty left area of your taskbar. Double-click it to open the GUI; right-click for a compact 1-line mode. Remembers monitor placement across restarts.
 * **Single-instance activation**: Launching the script while an instance is already running (minimized to tray or widget) instantly wakes and restores the existing window to the foreground instead of hanging or starting duplicate processes.
 * **Essential controls without clutter**: Power limit slider + presets, independent 2-fan control, core/memory clock offsets, and thermal limits.
