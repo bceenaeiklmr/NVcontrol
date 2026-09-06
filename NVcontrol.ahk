@@ -1,6 +1,6 @@
 /**
  * @file NVcontrol.ahk
- * @description Native GPU Power Limit, Clock Offset & Fan Controller for Windows (NVcontrol), written in AutoHotkey v2.
+ * @description GPU Power Limit, Clock Offset & Fan Controller for Windows (NVcontrol), written in AutoHotkey v2.
  * Utilizes direct Win32 DllCall with nvml.dll. ~3 MB RAM usage.
  * @version 1.0.0
  * @license MIT
@@ -148,10 +148,10 @@ class StartupManager {
                     try FileDelete(this.LegacyShortcutPath)
                 if FileExist(this.AncientShortcutPath)
                     try FileDelete(this.AncientShortcutPath)
-                FileCreateShortcut(target, this.ShortcutPath, A_ScriptDir, args, "NVcontrol — GPU Hardware & Power Controller", A_ScriptFullPath)
+                FileCreateShortcut(target, this.ShortcutPath, A_ScriptDir, args, "NVcontrol - GPU Hardware & Power Controller", A_ScriptFullPath)
                 return true
             } catch as err {
-                MsgBox("Failed to create Windows startup shortcut:`n`n" err.Message, "NVcontrol — Startup Error", "Iconx")
+                MsgBox("Failed to create Windows startup shortcut:`n`n" err.Message, "NVcontrol - Startup Error", "Iconx")
                 return false
             }
         } else {
@@ -164,7 +164,7 @@ class StartupManager {
                     FileDelete(this.AncientShortcutPath)
                 return true
             } catch as err {
-                MsgBox("Failed to remove Windows startup shortcut:`n`n" err.Message, "NVcontrol — Startup Error", "Iconx")
+                MsgBox("Failed to remove Windows startup shortcut:`n`n" err.Message, "NVcontrol - Startup Error", "Iconx")
                 return false
             }
         }
@@ -1237,7 +1237,7 @@ class NvControlGui {
      */
     BuildWindow() {
         this.OwnerGui := Gui()
-        this.Gui := Gui("+Owner" this.OwnerGui.Hwnd " -MaximizeBox", "NVcontrol — GPU Hardware & Power Controller")
+        this.Gui := Gui("+Owner" this.OwnerGui.Hwnd " -MaximizeBox", "NVcontrol - GPU Hardware & Power Controller")
         this.Gui.SetFont("s9", "Segoe UI")
         this.Gui.MarginX := 18
         this.Gui.MarginY := 14
@@ -1459,7 +1459,7 @@ class NvControlGui {
         if enable {
             res := MsgBox("Are you sure you want NVcontrol to start automatically with Windows?`n`n"
                 . "The application will launch minimized to the background on system startup.",
-                "NVcontrol — Start with Windows", "YesNo Icon? 256")
+                "NVcontrol - Start with Windows", "YesNo Icon? 256")
             if (res != "Yes") {
                 this.chkStartup.Value := 0
                 return
@@ -1946,7 +1946,7 @@ class TrayController {
      * @param {TaskbarWidget} widget - Active widget instance.
      */
     static Setup(controller, widget) {
-        A_IconTip := "NVcontrol — GPU Hardware & Power Controller"
+        A_IconTip := "NVcontrol - GPU Hardware & Power Controller"
         tray := A_TrayMenu
         tray.Delete()
         tray.Add("Open Controller", (*) => controller.Restore())
@@ -2041,7 +2041,7 @@ Main() {
     try {
         gpu := NvmlDevice(0)
     } catch as initErr {
-        MsgBox("Unable to initialize NVIDIA Management Library (NVML):`n`n" initErr.Message, "NVcontrol — Error", "Iconx")
+        MsgBox("Unable to initialize NVIDIA Management Library (NVML):`n`n" initErr.Message, "NVcontrol - Error", "Iconx")
         InstanceManager.Close()
         ExitApp(1)
     }
