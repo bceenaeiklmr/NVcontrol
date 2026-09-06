@@ -1464,8 +1464,9 @@ class NvControlGui {
             btnResetPower := this.Gui.AddButton(Format("x332 yp w{} h34", actionBtnW), "↺ Reset to VBIOS Default")
             btnResetPower.OnEvent("Click", (*) => this.ResetPowerLimit())
         } else {
-            this.txtPowerRange := this.Gui.AddText(Format("x34 yp+24 w{} Center c8A5D00 Bold", innerW),
+            this.txtPowerRange := this.Gui.AddText(Format("x34 yp+24 w{} Center c8A5D00", innerW),
                 "Power Limit: Managed by Laptop Dynamic Boost / Locked by OEM Firmware")
+            this.txtPowerRange.SetFont("Bold")
             this.Gui.AddText(Format("x34 yp+24 w{} Center c777777", innerW),
                 "Mobile GPU TGP is dynamically modulated by ACPI power policies and cannot be overridden.")
 
@@ -1560,8 +1561,9 @@ class NvControlGui {
             btnFan100 := this.Gui.AddButton("x+10 yp w96 h26", "100%")
             btnFan100.OnEvent("Click", (*) => this.SetFanPreset(100))
         } else {
-            this.txtFanStatus := this.Gui.AddText(Format("x34 yp+24 w{} c8A5D00 Bold", innerW),
+            this.txtFanStatus := this.Gui.AddText(Format("x34 yp+24 w{} c8A5D00", innerW),
                 "Fan Control: Managed by Laptop Embedded Controller (EC) / OEM BIOS")
+            this.txtFanStatus.SetFont("Bold")
             this.Gui.AddText(Format("x34 yp+24 w{} c777777", innerW),
                 "Laptop GPU fans are governed by motherboard EC firmware. NVML fan speed overrides are unavailable.")
 
