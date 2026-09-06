@@ -368,6 +368,8 @@ class NVML {
 
         r := this.Call("nvmlInit_v2", "Int")
         if (r != 0)
+            r := this.Call("nvmlInit", "Int")
+        if (r != 0)
             throw Error("NVML initialization failed: " this.ErrorString(r))
         return true
     }
@@ -385,28 +387,43 @@ class NVML {
     }
 
     /**
+     * Checks if a symbol is exported by nvml.dll.
+     * @param {String} name - Exported symbol name.
+     * @returns {Boolean} True if procedure is exported.
+     */
+    static HasProc(name) {
+        if this.Functions.Has(name)
+            return (this.Functions[name] != 0)
+        p := DllCall("GetProcAddress", "Ptr", this.hModule, "AStr", name, "Ptr")
+        this.Functions[name] := p
+        return (p != 0)
+    }
+
+    /**
      * Resolves and caches a function pointer from nvml.dll.
      * @param {String} name - Exported symbol name.
-     * @returns {Integer} Function address pointer.
-     * @throws {Error} If symbol is not found.
+     * @returns {Integer} Function address pointer, or 0 if not found.
      */
     static GetProc(name) {
         if this.Functions.Has(name)
             return this.Functions[name]
         p := DllCall("GetProcAddress", "Ptr", this.hModule, "AStr", name, "Ptr")
-        if !p
-            throw Error("NVML function not found: " name)
-        return this.Functions[name] := p
+        this.Functions[name] := p
+        return p
     }
 
     /**
      * Invokes an NVML function pointer with typed arguments.
+     * If the procedure is not exported by the installed driver, returns
+     * NVML_ERROR_FUNCTION_NOT_FOUND (13) instead of throwing an unhandled exception.
      * @param {String} name - Exported symbol name.
      * @param {Array} argTypes - Variable arguments for DllCall.
-     * @returns {*} Return value from DllCall.
+     * @returns {*} Return value from DllCall, or 13 if missing.
      */
     static Call(name, argTypes*) {
         fn := this.GetProc(name)
+        if !fn
+            return 13 ; NVML_ERROR_FUNCTION_NOT_FOUND
         return DllCall(fn, argTypes*)
     }
 
@@ -418,10 +435,16 @@ class NVML {
     static ErrorString(code) {
         try {
             fn := this.GetProc("nvmlErrorString")
-            ptr := DllCall(fn, "Int", code, "Ptr")
-            if ptr
-                return StrGet(ptr, "CP0")
+            if fn {
+                ptr := DllCall(fn, "Int", code, "Ptr")
+                if ptr
+                    return StrGet(ptr, "CP0")
+            }
         }
+        if (code == 3)
+            return "Not supported on this hardware / driver"
+        if (code == 13)
+            return "Function not found (requires newer NVIDIA driver)"
         return "NVML Error Code " code
     }
 }
@@ -437,12 +460,15 @@ class NvmlDevice {
     Name := ""
     DriverVersion := ""
     NumFans := 0
+    FansSupported := false
+    PowerSupported := false
     MinFan := 30
     MaxFan := 100
     MinPower := 100.0
     MaxPower := 380.0
     DefaultPower := 370.0
     ManualFanActive := false
+    HasMemV2 := true
 
     ; Pre-allocated reusable buffers to avoid heap fragmentation and GC pressure
     utilBuf := Buffer(8, 0)
@@ -450,7 +476,42 @@ class NvmlDevice {
     offsetBuf := Buffer(24, 0)
 
     /**
+     * Queries total count of NVIDIA GPU devices present in system.
+     * @returns {Integer} Detected device count.
+     */
+    static GetDeviceCount() {
+        count := 0
+        r := NVML.Call("nvmlDeviceGetCount_v2", "UIntP", &count, "Int")
+        if (r != 0)
+            r := NVML.Call("nvmlDeviceGetCount", "UIntP", &count, "Int")
+        return (r == 0) ? count : 0
+    }
+
+    /**
+     * Enumerates NVIDIA devices and returns the zero-based index of the first responsive GPU.
+     * Ideal for laptops with dual GPUs (Intel iGPU + NVIDIA dGPU) or multi-GPU desktop systems.
+     * @returns {Integer} Zero-based GPU device index.
+     */
+    static FindFirstAvailableDevice() {
+        NVML.Init()
+        count := NvmlDevice.GetDeviceCount()
+        if (count <= 0)
+            return 0
+        Loop count {
+            idx := A_Index - 1
+            hDev := 0
+            r := NVML.Call("nvmlDeviceGetHandleByIndex_v2", "UInt", idx, "PtrP", &hDev, "Int")
+            if (r != 0)
+                r := NVML.Call("nvmlDeviceGetHandleByIndex", "UInt", idx, "PtrP", &hDev, "Int")
+            if (r == 0 && hDev != 0)
+                return idx
+        }
+        return 0
+    }
+
+    /**
      * Connects to a GPU device handle by index and caches device metadata.
+     * Gracefully adapts to desktop and laptop (Optimus/mobile) hardware architectures.
      * @param {Integer} index - Zero-based GPU index (default 0).
      */
     __New(index := 0) {
@@ -459,7 +520,9 @@ class NvmlDevice {
 
         hDev := 0
         r := NVML.Call("nvmlDeviceGetHandleByIndex_v2", "UInt", index, "PtrP", &hDev, "Int")
-        if r != 0
+        if (r != 0)
+            r := NVML.Call("nvmlDeviceGetHandleByIndex", "UInt", index, "PtrP", &hDev, "Int")
+        if (r != 0)
             throw Error("Failed to get GPU device handle: " NVML.ErrorString(r))
         this.Handle := hDev
 
@@ -473,37 +536,47 @@ class NvmlDevice {
         NVML.Call("nvmlSystemGetDriverVersion", "Ptr", verBuf, "UInt", 80, "Int")
         this.DriverVersion := StrGet(verBuf, "UTF-8")
 
-        ; Fan Count & Constraints
+        ; Fan Count & Constraints (Mobile GPUs are managed by laptop EC and will return 0 / not supported)
         numFans := 0
-        NVML.Call("nvmlDeviceGetNumFans", "Ptr", this.Handle, "UIntP", &numFans, "Int")
-        this.NumFans := numFans
+        rFans := NVML.Call("nvmlDeviceGetNumFans", "Ptr", this.Handle, "UIntP", &numFans, "Int")
+        this.NumFans := (rFans == 0) ? numFans : 0
+        this.FansSupported := (this.NumFans > 0)
 
         minFan := 30, maxFan := 100
-        NVML.Call("nvmlDeviceGetMinMaxFanSpeed", "Ptr", this.Handle, "UIntP", &minFan, "UIntP", &maxFan, "Int")
+        if this.FansSupported {
+            NVML.Call("nvmlDeviceGetMinMaxFanSpeed", "Ptr", this.Handle, "UIntP", &minFan, "UIntP", &maxFan, "Int")
+        }
         this.MinFan := minFan
         this.MaxFan := maxFan
 
         ; Power Limits (converted milliwatts -> watts)
         minP := 0, maxP := 0, defP := 0
-        NVML.Call("nvmlDeviceGetPowerManagementLimitConstraints", "Ptr", this.Handle, "UIntP", &minP, "UIntP", &maxP, "Int")
+        rLim := NVML.Call("nvmlDeviceGetPowerManagementLimitConstraints", "Ptr", this.Handle, "UIntP", &minP, "UIntP", &maxP, "Int")
         NVML.Call("nvmlDeviceGetPowerManagementDefaultLimit", "Ptr", this.Handle, "UIntP", &defP, "Int")
-        this.MinPower := Round(minP / 1000.0, 1)
-        this.MaxPower := Round(maxP / 1000.0, 1)
-        this.DefaultPower := Round(defP / 1000.0, 1)
+        this.PowerSupported := (rLim == 0 && minP > 0 && maxP > minP)
+        this.MinPower := this.PowerSupported ? Round(minP / 1000.0, 1) : 0
+        this.MaxPower := this.PowerSupported ? Round(maxP / 1000.0, 1) : 0
+        this.DefaultPower := (defP > 0) ? Round(defP / 1000.0, 1) : this.MaxPower
+
+        ; Memory telemetry capability (v2 introduced in driver 510)
+        this.HasMemV2 := NVML.HasProc("nvmlDeviceGetMemoryInfo_v2")
 
         ; Pre-initialize struct version headers
-        NumPut("UInt", 40 | (2 << 24), this.memBuf, 0)   ; 0x02000028 (NvmlMemory_v2)
+        if this.HasMemV2
+            NumPut("UInt", 40 | (2 << 24), this.memBuf, 0)   ; 0x02000028 (NvmlMemory_v2)
         NumPut("UInt", 24 | (1 << 24), this.offsetBuf, 0) ; 0x01000018 (NvmlClockOffset_v1)
     }
 
     /**
      * Reads current, default, min, and max power limits.
-     * @returns {Map} Map with keys "Min", "Max", "Default", "Current" in Watts.
+     * @returns {Map|Boolean} Map with keys "Min", "Max", "Default", "Current" in Watts, or false if unsupported.
      */
     GetPowerLimits() {
+        if !this.PowerSupported
+            return false
         curP := 0
         r := NVML.Call("nvmlDeviceGetPowerManagementLimit", "Ptr", this.Handle, "UIntP", &curP, "Int")
-        if r != 0
+        if (r != 0 || curP <= 0)
             return false
         return Map(
             "Min", this.MinPower,
@@ -517,9 +590,11 @@ class NvmlDevice {
      * Sets the GPU power management limit in Watts.
      * @param {Number} watts - Requested power limit in Watts.
      * @returns {Number} Verified active power limit in Watts.
-     * @throws {ValueError|Error} If out of range or insufficient permissions.
+     * @throws {ValueError|Error} If out of range, unsupported, or insufficient permissions.
      */
     SetPowerLimit(watts) {
+        if !this.PowerSupported
+            throw Error("Power management limit is not supported or locked on this device (e.g. Laptop Dynamic Boost).")
         watts := Round(Number(watts), 1)
         if (watts < this.MinPower || watts > this.MaxPower)
             throw ValueError(Format("Power limit {} W is outside supported GPU range ({} - {} W).", watts, this.MinPower, this.MaxPower))
@@ -543,6 +618,8 @@ class NvmlDevice {
      * @returns {Number} Verified active power limit in Watts.
      */
     ResetPowerLimit() {
+        if !this.PowerSupported
+            throw Error("Power management limit is not supported on this device.")
         return this.SetPowerLimit(this.DefaultPower)
     }
 
@@ -578,7 +655,16 @@ class NvmlDevice {
     }
 
     /**
+     * Restores target temperature to factory standard 80 °C.
+     * @returns {Boolean} True on success.
+     */
+    ResetTargetTemp() {
+        return this.SetTargetTemp(80)
+    }
+
+    /**
      * Polls complete live hardware telemetry in a single sub-millisecond pass using pre-allocated buffers.
+     * Handles both desktop and mobile GPUs, supporting v2 with v1 fallback.
      * @returns {Map} Live telemetry data.
      */
     GetTelemetry() {
@@ -601,24 +687,40 @@ class NvmlDevice {
         gpuLoad := NumGet(this.utilBuf, 0, "UInt")
         memUtil := NumGet(this.utilBuf, 4, "UInt")
 
-        ; Memory v2 (reusing this.memBuf)
-        NVML.Call("nvmlDeviceGetMemoryInfo_v2", "Ptr", this.Handle, "Ptr", this.memBuf, "Int")
-        totalBytes := NumGet(this.memBuf, 8, "UInt64")
-        usedBytes := NumGet(this.memBuf, 32, "UInt64")
+        ; Memory Telemetry (v2 with v1 fallback)
+        totalBytes := 0, usedBytes := 0
+        if this.HasMemV2 {
+            NumPut("UInt", 40 | (2 << 24), this.memBuf, 0)
+            rMem := NVML.Call("nvmlDeviceGetMemoryInfo_v2", "Ptr", this.Handle, "Ptr", this.memBuf, "Int")
+            if (rMem == 0) {
+                totalBytes := NumGet(this.memBuf, 8, "UInt64")
+                usedBytes := NumGet(this.memBuf, 32, "UInt64")
+            }
+        }
+        if (totalBytes == 0) {
+            memBufV1 := Buffer(24, 0)
+            rMem1 := NVML.Call("nvmlDeviceGetMemoryInfo", "Ptr", this.Handle, "Ptr", memBufV1, "Int")
+            if (rMem1 == 0) {
+                totalBytes := NumGet(memBufV1, 0, "UInt64")
+                usedBytes := NumGet(memBufV1, 16, "UInt64")
+            }
+        }
 
-        ; Fan Speeds
+        ; Fan Speeds (only polled if fans are supported by NVML on this hardware)
         fanSpeeds := []
-        Loop this.NumFans {
-            spd := 0
-            NVML.Call("nvmlDeviceGetFanSpeed_v2", "Ptr", this.Handle, "UInt", A_Index - 1, "UIntP", &spd, "Int")
-            fanSpeeds.Push(spd)
+        if this.FansSupported {
+            Loop this.NumFans {
+                spd := 0
+                NVML.Call("nvmlDeviceGetFanSpeed_v2", "Ptr", this.Handle, "UInt", A_Index - 1, "UIntP", &spd, "Int")
+                fanSpeeds.Push(spd)
+            }
         }
 
         return Map(
             "Name", this.Name,
             "Driver", this.DriverVersion,
             "PowerDraw", Round(pwrDraw / 1000.0, 1),
-            "PowerLimit", Round(curLimit / 1000.0, 1),
+            "PowerLimit", (curLimit > 0) ? Round(curLimit / 1000.0, 1) : 0,
             "Temperature", temp,
             "CoreClock", coreClk,
             "MemoryClock", memClk,
@@ -637,6 +739,8 @@ class NvmlDevice {
      * @returns {Boolean} True on success.
      */
     SetFanSpeed(percent, fanIdx := -1) {
+        if !this.FansSupported
+            throw Error("Fan speed control is not supported on this hardware (fans managed by Laptop EC / System BIOS).")
         percent := Integer(percent)
         if (percent < this.MinFan || percent > this.MaxFan)
             throw ValueError(Format("Fan speed {}% is outside supported range ({}% - {}%).", percent, this.MinFan, this.MaxFan))
@@ -654,6 +758,7 @@ class NvmlDevice {
             }
         }
         this.ManualFanActive := true
+        Safety.TouchCanary()
         return true
     }
 
@@ -662,6 +767,8 @@ class NvmlDevice {
      * @returns {Boolean} True on success.
      */
     ResetFansToAuto() {
+        if !this.FansSupported
+            return true
         Loop this.NumFans {
             r := NVML.Call("nvmlDeviceSetDefaultFanSpeed_v2", "Ptr", this.Handle, "UInt", A_Index - 1, "Int")
             if r != 0 {
@@ -678,9 +785,17 @@ class NvmlDevice {
     /**
      * Queries current clock offsets and supported offset ranges for Core and Memory.
      * Uses pre-allocated nvmlClockOffset_v1_t struct (size 24, version 0x01000018).
+     * Supported on NVIDIA display driver 555.85 or later.
      * @returns {Map} Map containing offsets and bounds in MHz.
      */
     GetClockOffsets() {
+        if !NVML.HasProc("nvmlDeviceGetClockOffsets") {
+            return Map(
+                "Supported", false,
+                "CoreOffset", 0, "CoreMin", -1000, "CoreMax", 1000,
+                "MemOffset", 0, "MemMin", -2000, "MemMax", 6000
+            )
+        }
         NumPut("UInt", 24 | (1 << 24), this.offsetBuf, 0) ; 0x01000018
         NumPut("UInt", 0, this.offsetBuf, 4)               ; NVML_CLOCK_GRAPHICS
         NumPut("UInt", 0, this.offsetBuf, 8)               ; P0
@@ -697,6 +812,7 @@ class NvmlDevice {
         memMax := (rM == 0) ? NumGet(this.offsetBuf, 20, "Int") : 6000
 
         return Map(
+            "Supported", (rC == 0 || rM == 0),
             "CoreOffset", coreOffset, "CoreMin", coreMin, "CoreMax", coreMax,
             "MemOffset", memOffset, "MemMin", memMin, "MemMax", memMax
         )
@@ -708,6 +824,8 @@ class NvmlDevice {
      * @returns {Boolean} True on success.
      */
     SetCoreClockOffset(mhz) {
+        if !NVML.HasProc("nvmlDeviceSetClockOffsets")
+            throw Error("Clock offset control requires NVIDIA display driver 555.85 or later.")
         mhz := Integer(mhz)
         NumPut("UInt", 24 | (1 << 24), this.offsetBuf, 0)
         NumPut("UInt", 0, this.offsetBuf, 4) ; NVML_CLOCK_GRAPHICS
@@ -720,6 +838,7 @@ class NvmlDevice {
                 throw Error("Administrator privileges are required to set clock offsets.")
             throw Error(Format("Failed to set Core Clock Offset to {} MHz: {}", mhz, errStr))
         }
+        Safety.TouchCanary()
         return true
     }
 
@@ -729,6 +848,8 @@ class NvmlDevice {
      * @returns {Boolean} True on success.
      */
     SetMemClockOffset(mhz) {
+        if !NVML.HasProc("nvmlDeviceSetClockOffsets")
+            throw Error("Clock offset control requires NVIDIA display driver 555.85 or later.")
         mhz := Integer(mhz)
         NumPut("UInt", 24 | (1 << 24), this.offsetBuf, 0)
         NumPut("UInt", 2, this.offsetBuf, 4) ; NVML_CLOCK_MEM
@@ -741,6 +862,7 @@ class NvmlDevice {
                 throw Error("Administrator privileges are required to set memory clock offsets.")
             throw Error(Format("Failed to set Memory Clock Offset to {} MHz: {}", mhz, errStr))
         }
+        Safety.TouchCanary()
         return true
     }
 
@@ -749,6 +871,8 @@ class NvmlDevice {
      * @returns {Boolean} True on success.
      */
     ResetClockOffsets() {
+        if !NVML.HasProc("nvmlDeviceSetClockOffsets")
+            return false
         this.SetCoreClockOffset(0)
         this.SetMemClockOffset(0)
         return true
@@ -761,6 +885,8 @@ class NvmlDevice {
      * @returns {Boolean} True on success.
      */
     LockGpuClocks(maxClock, minClock := 0) {
+        if !NVML.HasProc("nvmlDeviceSetGpuLockedClocks")
+            throw Error("Clock locking is not supported by installed driver or hardware.")
         maxClock := Integer(maxClock)
         minClock := Integer(minClock)
         r := NVML.Call("nvmlDeviceSetGpuLockedClocks", "Ptr", this.Handle, "UInt", minClock, "UInt", maxClock, "Int")
@@ -770,6 +896,7 @@ class NvmlDevice {
                 throw Error("Administrator privileges are required to lock GPU clocks.")
             throw Error("Failed to lock GPU clocks: " errStr)
         }
+        Safety.TouchCanary()
         return true
     }
 
@@ -778,12 +905,14 @@ class NvmlDevice {
      * @returns {Boolean} True on success.
      */
     ResetGpuClocks() {
+        if !NVML.HasProc("nvmlDeviceResetGpuLockedClocks")
+            return true
         r := NVML.Call("nvmlDeviceResetGpuLockedClocks", "Ptr", this.Handle, "Int")
         if r != 0 {
             errStr := NVML.ErrorString(r)
             if (r == 7 || InStr(errStr, "Permission"))
                 throw Error("Administrator privileges are required to reset GPU clocks.")
-            throw Error("Failed to reset GPU clocks: " errStr)
+            throw Error("Failed to unlock GPU clocks: " errStr)
         }
         return true
     }
@@ -1097,13 +1226,17 @@ class TaskbarWidget {
      * @param {Map} t - Telemetry dictionary from NvmlDevice.
      */
     Update(t) {
+        pwrDraw := t["PowerDraw"]
+        pwrLimit := t["PowerLimit"]
         if this.IsCompact {
-            this.txtLine1.Text := Format("GPU: {}% | BW: {}% | {}°C | {:.0f}W/{:.0f}W | {:.1f}G",
-                t["GpuLoad"], t["MemUtil"], t["Temperature"], t["PowerDraw"], t["PowerLimit"], t["MemoryUsedGB"])
+            pwrStr := (pwrLimit > 0) ? Format("{:.0f}W/{:.0f}W", pwrDraw, pwrLimit) : Format("{:.0f}W", pwrDraw)
+            this.txtLine1.Text := Format("GPU: {}% | BW: {}% | {}°C | {} | {:.1f}G",
+                t["GpuLoad"], t["MemUtil"], t["Temperature"], pwrStr, t["MemoryUsedGB"])
         } else {
             this.txtLine1.Text := Format("GPU: {}%  |  BW: {}%  |  {}°C", t["GpuLoad"], t["MemUtil"], t["Temperature"])
-            this.txtLine2.Text := Format("{:.1f}W / {:.1f}W  |  VRAM: {:.1f}/{:.0f} GB",
-                t["PowerDraw"], t["PowerLimit"], t["MemoryUsedGB"], t["MemoryTotalGB"])
+            pwrStr := (pwrLimit > 0) ? Format("{:.1f}W / {:.1f}W", pwrDraw, pwrLimit) : Format("{:.1f}W", pwrDraw)
+            this.txtLine2.Text := Format("{}  |  VRAM: {:.1f}/{:.0f} GB",
+                pwrStr, t["MemoryUsedGB"], t["MemoryTotalGB"])
         }
     }
 }
@@ -1288,127 +1421,164 @@ class NvControlGui {
 
         ; Section 2: Power Limit Control
         this.Gui.AddGroupBox(Format("x18 y+14 w{} h185", grpW), "Power Limit Control")
-        this.txtPowerRange := this.Gui.AddText(Format("x34 yp+24 w{} Center", innerW),
-            Format("Range: {} W - {} W   |   VBIOS Default: {} W   |   Current: {} W", this.pMin, this.pMax, this.pDef, this.pCur))
+        if this.Gpu.PowerSupported {
+            this.txtPowerRange := this.Gui.AddText(Format("x34 yp+24 w{} Center", innerW),
+                Format("Range: {} W - {} W   |   VBIOS Default: {} W   |   Current: {} W", this.pMin, this.pMax, this.pDef, this.pCur))
 
-        sliderW := innerW - 86 ; 490px
-        this.sldPower := this.Gui.AddSlider(Format("x34 yp+26 w{} Thick20 ToolTip Range{}-{}", sliderW, this.pMin, this.pMax), this.pCur)
-        this.edtPower := this.Gui.AddEdit("x530 yp-2 w55 h26 Center Number", this.pCur)
-        this.Gui.AddText("x590 yp+4 w20", "W")
+            sliderW := innerW - 86 ; 490px
+            this.sldPower := this.Gui.AddSlider(Format("x34 yp+26 w{} Thick20 ToolTip Range{}-{}", sliderW, this.pMin, this.pMax), this.pCur)
+            this.edtPower := this.Gui.AddEdit("x530 yp-2 w55 h26 Center Number", this.pCur)
+            this.Gui.AddText("x590 yp+4 w20", "W")
 
-        this.sldPower.OnEvent("Change", (ctrl, *) => this.edtPower.Value := ctrl.Value)
-        this.edtPower.OnEvent("Change", (ctrl, *) => this.OnEditPowerChange(ctrl.Value))
+            this.sldPower.OnEvent("Change", (ctrl, *) => this.edtPower.Value := ctrl.Value)
+            this.edtPower.OnEvent("Change", (ctrl, *) => this.OnEditPowerChange(ctrl.Value))
 
-        ; Quick Presets
-        this.Gui.AddText("x34 yp+36 w55", "Presets:")
-        pStep1 := Round(this.pMin + (this.pMax - this.pMin) * 0.2)
-        pStep2 := Round(this.pMin + (this.pMax - this.pMin) * 0.4)
-        pStep3 := Round(this.pMin + (this.pMax - this.pMin) * 0.6)
-        pStep4 := Round(this.pMin + (this.pMax - this.pMin) * 0.8)
+            ; Quick Presets
+            this.Gui.AddText("x34 yp+36 w55", "Presets:")
+            pStep1 := Round(this.pMin + (this.pMax - this.pMin) * 0.2)
+            pStep2 := Round(this.pMin + (this.pMax - this.pMin) * 0.4)
+            pStep3 := Round(this.pMin + (this.pMax - this.pMin) * 0.6)
+            pStep4 := Round(this.pMin + (this.pMax - this.pMin) * 0.8)
 
-        pBtnW := 93
-        pGap := 10
-        btnP1 := this.Gui.AddButton(Format("x94 yp-4 w{} h26", pBtnW), pStep1 " W")
-        btnP1.OnEvent("Click", (*) => this.SetPowerSliderValue(pStep1))
+            pBtnW := 93
+            pGap := 10
+            btnP1 := this.Gui.AddButton(Format("x94 yp-4 w{} h26", pBtnW), pStep1 " W")
+            btnP1.OnEvent("Click", (*) => this.SetPowerSliderValue(pStep1))
 
-        btnP2 := this.Gui.AddButton(Format("x+{} yp w{} h26", pGap, pBtnW), pStep2 " W")
-        btnP2.OnEvent("Click", (*) => this.SetPowerSliderValue(pStep2))
+            btnP2 := this.Gui.AddButton(Format("x+{} yp w{} h26", pGap, pBtnW), pStep2 " W")
+            btnP2.OnEvent("Click", (*) => this.SetPowerSliderValue(pStep2))
 
-        btnP3 := this.Gui.AddButton(Format("x+{} yp w{} h26", pGap, pBtnW), pStep3 " W")
-        btnP3.OnEvent("Click", (*) => this.SetPowerSliderValue(pStep3))
+            btnP3 := this.Gui.AddButton(Format("x+{} yp w{} h26", pGap, pBtnW), pStep3 " W")
+            btnP3.OnEvent("Click", (*) => this.SetPowerSliderValue(pStep3))
 
-        btnP4 := this.Gui.AddButton(Format("x+{} yp w{} h26", pGap, pBtnW), pStep4 " W")
-        btnP4.OnEvent("Click", (*) => this.SetPowerSliderValue(pStep4))
+            btnP4 := this.Gui.AddButton(Format("x+{} yp w{} h26", pGap, pBtnW), pStep4 " W")
+            btnP4.OnEvent("Click", (*) => this.SetPowerSliderValue(pStep4))
 
-        btnPDef := this.Gui.AddButton(Format("x+{} yp w{} h26", pGap, pBtnW + 15), "Default")
-        btnPDef.OnEvent("Click", (*) => this.SetPowerSliderValue(this.pDef))
+            btnPDef := this.Gui.AddButton(Format("x+{} yp w{} h26", pGap, pBtnW + 15), "Default")
+            btnPDef.OnEvent("Click", (*) => this.SetPowerSliderValue(this.pDef))
 
-        btnApplyPower := this.Gui.AddButton(Format("x34 yp+38 w{} h34 Default", actionBtnW), "✔ Apply Power Limit")
-        btnApplyPower.SetFont("Bold")
-        btnApplyPower.OnEvent("Click", (*) => this.ApplyPowerLimit())
+            btnApplyPower := this.Gui.AddButton(Format("x34 yp+38 w{} h34 Default", actionBtnW), "✔ Apply Power Limit")
+            btnApplyPower.SetFont("Bold")
+            btnApplyPower.OnEvent("Click", (*) => this.ApplyPowerLimit())
 
-        btnResetPower := this.Gui.AddButton(Format("x332 yp w{} h34", actionBtnW), "↺ Reset to VBIOS Default")
-        btnResetPower.OnEvent("Click", (*) => this.ResetPowerLimit())
+            btnResetPower := this.Gui.AddButton(Format("x332 yp w{} h34", actionBtnW), "↺ Reset to VBIOS Default")
+            btnResetPower.OnEvent("Click", (*) => this.ResetPowerLimit())
+        } else {
+            this.txtPowerRange := this.Gui.AddText(Format("x34 yp+24 w{} Center c8A5D00 Bold", innerW),
+                "Power Limit: Managed by Laptop Dynamic Boost / Locked by OEM Firmware")
+            this.Gui.AddText(Format("x34 yp+24 w{} Center c777777", innerW),
+                "Mobile GPU TGP is dynamically modulated by ACPI power policies and cannot be overridden.")
+
+            this.sldPower := this.Gui.AddSlider(Format("x34 yp+28 w{} Disabled", innerW - 86), 0)
+            this.edtPower := this.Gui.AddEdit("x530 yp-2 w55 h26 Center Disabled", "--")
+            this.Gui.AddText("x590 yp+4 w20", "W")
+
+            btnApplyPower := this.Gui.AddButton(Format("x34 yp+44 w{} h34 Disabled", actionBtnW), "✔ Apply Power Limit")
+            btnResetPower := this.Gui.AddButton(Format("x332 yp w{} h34 Disabled", actionBtnW), "↺ Reset to VBIOS Default")
+        }
 
         ; Section 3: Clock Offsets & Lock
         offsets := this.Gpu.GetClockOffsets()
+        offsetsSupported := offsets["Supported"]
         initCore := offsets["CoreOffset"]
         initMem := offsets["MemOffset"]
+        hasLockClocks := NVML.HasProc("nvmlDeviceSetGpuLockedClocks")
 
-        this.Gui.AddGroupBox(Format("x18 y+14 w{} h145", grpW), "Clock Offsets & Lock")
+        this.Gui.AddGroupBox(Format("x18 y+14 w{} h145", grpW), "Clock Offsets & Lock" . (offsetsSupported ? "" : " (Offsets Require Driver 555.85+)"))
 
         this.Gui.AddText("x34 yp+25 w125", "Core Clock Offset:")
-        this.sldCoreOffset := this.Gui.AddSlider("x162 yp-4 w245 ToolTip Range-500-500", initCore)
-        this.edtCoreOffset := this.Gui.AddEdit("x415 yp w50 h24 Center", initCore)
+        this.sldCoreOffset := this.Gui.AddSlider("x162 yp-4 w245 ToolTip Range-500-500" . (offsetsSupported ? "" : " Disabled"), initCore)
+        this.edtCoreOffset := this.Gui.AddEdit("x415 yp w50 h24 Center" . (offsetsSupported ? "" : " Disabled"), initCore)
         this.Gui.AddText("x470 yp+3 w28", "MHz")
-        btnApplyCore := this.Gui.AddButton("x502 yp-3 w108 h25", "Apply Core")
+        btnApplyCore := this.Gui.AddButton("x502 yp-3 w108 h25" . (offsetsSupported ? "" : " Disabled"), "Apply Core")
         btnApplyCore.OnEvent("Click", (*) => this.ApplyCoreOffset())
 
         this.sldCoreOffset.OnEvent("Change", (ctrl, *) => this.edtCoreOffset.Value := ctrl.Value)
         this.edtCoreOffset.OnEvent("Change", (ctrl, *) => this.OnEditCoreChange(ctrl.Value))
 
         this.Gui.AddText("x34 yp+34 w125", "Memory Offset:")
-        this.sldMemOffset := this.Gui.AddSlider("x162 yp-4 w245 ToolTip Range-1000-2000", initMem)
-        this.edtMemOffset := this.Gui.AddEdit("x415 yp w50 h24 Center", initMem)
+        this.sldMemOffset := this.Gui.AddSlider("x162 yp-4 w245 ToolTip Range-1000-2000" . (offsetsSupported ? "" : " Disabled"), initMem)
+        this.edtMemOffset := this.Gui.AddEdit("x415 yp w50 h24 Center" . (offsetsSupported ? "" : " Disabled"), initMem)
         this.Gui.AddText("x470 yp+3 w28", "MHz")
-        btnApplyMem := this.Gui.AddButton("x502 yp-3 w108 h25", "Apply Mem")
+        btnApplyMem := this.Gui.AddButton("x502 yp-3 w108 h25" . (offsetsSupported ? "" : " Disabled"), "Apply Mem")
         btnApplyMem.OnEvent("Click", (*) => this.ApplyMemOffset())
 
         this.sldMemOffset.OnEvent("Change", (ctrl, *) => this.edtMemOffset.Value := ctrl.Value)
         this.edtMemOffset.OnEvent("Change", (ctrl, *) => this.OnEditMemChange(ctrl.Value))
 
         this.Gui.AddText("x34 yp+34 w115", "Lock Core Clock:")
-        this.edtLockClock := this.Gui.AddEdit("x152 yp-3 w55 h25 Center Number", "1800")
+        this.edtLockClock := this.Gui.AddEdit("x152 yp-3 w55 h25 Center Number" . (hasLockClocks ? "" : " Disabled"), "1800")
         this.Gui.AddText("x212 yp+3 w28", "MHz")
-        btnLockClock := this.Gui.AddButton("x245 yp-3 w95 h25", "Lock Clock")
+        btnLockClock := this.Gui.AddButton("x245 yp-3 w95 h25" . (hasLockClocks ? "" : " Disabled"), "Lock Clock")
         btnLockClock.OnEvent("Click", (*) => this.ApplyLockClock())
 
-        btnUnlockClock := this.Gui.AddButton("x348 yp w115 h25", "↺ Unlock Clocks")
+        btnUnlockClock := this.Gui.AddButton("x348 yp w115 h25" . (hasLockClocks ? "" : " Disabled"), "↺ Unlock Clocks")
         btnUnlockClock.OnEvent("Click", (*) => this.ApplyResetClock())
 
-        btnResetOffsets := this.Gui.AddButton("x471 yp w139 h25", "↺ Reset Offsets (0)")
+        btnResetOffsets := this.Gui.AddButton("x471 yp w139 h25" . (offsetsSupported ? "" : " Disabled"), "↺ Reset Offsets (0)")
         btnResetOffsets.OnEvent("Click", (*) => this.ApplyResetOffsets())
 
         ; Section 4: Fan & Thermal Control
         targetTemp := this.Gpu.GetTargetTemp()
         this.Gui.AddGroupBox(Format("x18 y+14 w{} h155", grpW), "Fan & Thermal Control")
 
-        this.txtFanStatus := this.Gui.AddText(Format("x34 yp+24 w{}", innerW),
-            Format("Status: Auto (VBIOS Thermal Curve)  |  Speeds: Fan 0: --%, Fan 1: --%  |  Target: {} °C", targetTemp))
+        if this.Gpu.FansSupported {
+            this.txtFanStatus := this.Gui.AddText(Format("x34 yp+24 w{}", innerW),
+                Format("Status: Auto (VBIOS Thermal Curve)  |  Speeds: Fan 0: --%, Fan 1: --%  |  Target: {} °C", targetTemp))
 
-        this.Gui.AddText("x34 yp+26 w125", "Manual Fan Speed:")
-        this.sldFan := this.Gui.AddSlider("x162 yp-4 w245 ToolTip Range30-100", 50)
-        this.edtFan := this.Gui.AddEdit("x415 yp w50 h24 Center Number", "50")
-        this.Gui.AddText("x470 yp+3 w20", "%")
-        btnApplyFan := this.Gui.AddButton("x502 yp-3 w108 h25", "Apply Fans")
-        btnApplyFan.OnEvent("Click", (*) => this.ApplyFanSpeed())
+            this.Gui.AddText("x34 yp+26 w125", "Manual Fan Speed:")
+            this.sldFan := this.Gui.AddSlider(Format("x162 yp-4 w245 ToolTip Range{}-{}", this.Gpu.MinFan, this.Gpu.MaxFan), 50)
+            this.edtFan := this.Gui.AddEdit("x415 yp w50 h24 Center Number", "50")
+            this.Gui.AddText("x470 yp+3 w20", "%")
+            btnApplyFan := this.Gui.AddButton("x502 yp-3 w108 h25", "Apply Fans")
+            btnApplyFan.OnEvent("Click", (*) => this.ApplyFanSpeed())
 
-        this.sldFan.OnEvent("Change", (ctrl, *) => this.edtFan.Value := ctrl.Value)
-        this.edtFan.OnEvent("Change", (ctrl, *) => this.OnEditFanChange(ctrl.Value))
+            this.sldFan.OnEvent("Change", (ctrl, *) => this.edtFan.Value := ctrl.Value)
+            this.edtFan.OnEvent("Change", (ctrl, *) => this.OnEditFanChange(ctrl.Value))
 
-        this.Gui.AddText("x34 yp+32 w125", "Target Temperature:")
-        this.edtTargetTemp := this.Gui.AddEdit("x162 yp-3 w50 h25 Center Number", targetTemp)
-        this.Gui.AddText("x218 yp+3 w75", "°C (60-90°C)")
-        btnSetTemp := this.Gui.AddButton("x300 yp-3 w145 h25", "Set Target Temp")
-        btnSetTemp.OnEvent("Click", (*) => this.ApplyTargetTemp())
-        btnResetTemp := this.Gui.AddButton("x455 yp w155 h25", "↺ Reset Temp (80°C)")
-        btnResetTemp.OnEvent("Click", (*) => this.ResetTargetTemp())
+            this.Gui.AddText("x34 yp+32 w125", "Target Temperature:")
+            this.edtTargetTemp := this.Gui.AddEdit("x162 yp-3 w50 h25 Center Number", targetTemp)
+            this.Gui.AddText("x218 yp+3 w75", "°C (60-90°C)")
+            btnSetTemp := this.Gui.AddButton("x300 yp-3 w145 h25", "Set Target Temp")
+            btnSetTemp.OnEvent("Click", (*) => this.ApplyTargetTemp())
+            btnResetTemp := this.Gui.AddButton("x455 yp w155 h25", "↺ Reset Temp (80°C)")
+            btnResetTemp.OnEvent("Click", (*) => this.ResetTargetTemp())
 
-        btnFanAuto := this.Gui.AddButton("x34 yp+34 w160 h26", "↺ Restore Auto Fans")
-        btnFanAuto.SetFont("Bold")
-        btnFanAuto.OnEvent("Click", (*) => this.ResetFansToAuto())
+            btnFanAuto := this.Gui.AddButton("x34 yp+34 w160 h26", "↺ Restore Auto Fans")
+            btnFanAuto.SetFont("Bold")
+            btnFanAuto.OnEvent("Click", (*) => this.ResetFansToAuto())
 
-        btnFan40 := this.Gui.AddButton("x+10 yp w90 h26", "40%")
-        btnFan40.OnEvent("Click", (*) => this.SetFanPreset(40))
+            btnFan40 := this.Gui.AddButton("x+10 yp w90 h26", "40%")
+            btnFan40.OnEvent("Click", (*) => this.SetFanPreset(40))
 
-        btnFan60 := this.Gui.AddButton("x+10 yp w90 h26", "60%")
-        btnFan60.OnEvent("Click", (*) => this.SetFanPreset(60))
+            btnFan60 := this.Gui.AddButton("x+10 yp w90 h26", "60%")
+            btnFan60.OnEvent("Click", (*) => this.SetFanPreset(60))
 
-        btnFan80 := this.Gui.AddButton("x+10 yp w90 h26", "80%")
-        btnFan80.OnEvent("Click", (*) => this.SetFanPreset(80))
+            btnFan80 := this.Gui.AddButton("x+10 yp w90 h26", "80%")
+            btnFan80.OnEvent("Click", (*) => this.SetFanPreset(80))
 
-        btnFan100 := this.Gui.AddButton("x+10 yp w96 h26", "100%")
-        btnFan100.OnEvent("Click", (*) => this.SetFanPreset(100))
+            btnFan100 := this.Gui.AddButton("x+10 yp w96 h26", "100%")
+            btnFan100.OnEvent("Click", (*) => this.SetFanPreset(100))
+        } else {
+            this.txtFanStatus := this.Gui.AddText(Format("x34 yp+24 w{} c8A5D00 Bold", innerW),
+                "Fan Control: Managed by Laptop Embedded Controller (EC) / OEM BIOS")
+            this.Gui.AddText(Format("x34 yp+24 w{} c777777", innerW),
+                "Laptop GPU fans are governed by motherboard EC firmware. NVML fan speed overrides are unavailable.")
+
+            this.Gui.AddText("x34 yp+28 w125", "Manual Fan Speed:")
+            this.sldFan := this.Gui.AddSlider("x162 yp-4 w245 Disabled", 0)
+            this.edtFan := this.Gui.AddEdit("x415 yp w50 h24 Center Disabled", "--")
+            this.Gui.AddText("x470 yp+3 w20", "%")
+            btnApplyFan := this.Gui.AddButton("x502 yp-3 w108 h25 Disabled", "Apply Fans")
+
+            this.Gui.AddText("x34 yp+32 w125", "Target Temperature:")
+            this.edtTargetTemp := this.Gui.AddEdit("x162 yp-3 w50 h25 Center Number", targetTemp)
+            this.Gui.AddText("x218 yp+3 w75", "°C (60-90°C)")
+            btnSetTemp := this.Gui.AddButton("x300 yp-3 w145 h25", "Set Target Temp")
+            btnSetTemp.OnEvent("Click", (*) => this.ApplyTargetTemp())
+            btnResetTemp := this.Gui.AddButton("x455 yp w155 h25", "↺ Reset Temp (80°C)")
+            btnResetTemp.OnEvent("Click", (*) => this.ResetTargetTemp())
+        }
 
         ; Section 5: Bottom Actions
         btnMinTray := this.Gui.AddButton(Format("x34 y+20 w{} h34", actionBtnW), "🗕 Minimize to Tray (Completely)")
@@ -1892,14 +2062,27 @@ class NvControlGui {
             ; Power
             pwrDraw := t["PowerDraw"]
             pwrLimit := t["PowerLimit"]
-            this.txtPowerDraw.Text := Format("Power Draw: {:.1f} W / {:.1f} W", pwrDraw, pwrLimit)
+            if (pwrLimit > 0)
+                this.txtPowerDraw.Text := Format("Power Draw: {:.1f} W / {:.1f} W", pwrDraw, pwrLimit)
+            else
+                this.txtPowerDraw.Text := Format("Power Draw: {:.1f} W (ACPI Dynamic Boost)", pwrDraw)
 
             ; Temp & Fans
             temp := t["Temperature"]
             fans := t["FanSpeeds"]
-            fan0Str := (fans.Length >= 1) ? fans[1] "%" : "--%"
-            fan1Str := (fans.Length >= 2) ? fans[2] "%" : "--%"
-            this.txtTemp.Text := Format("Temp: {} °C (Fans: {} / {})", temp, fan0Str, fan1Str)
+            if (fans.Length >= 2) {
+                fan0Str := fans[1] "%"
+                fan1Str := fans[2] "%"
+                this.txtTemp.Text := Format("Temp: {} °C (Fans: {} / {})", temp, fan0Str, fan1Str)
+            } else if (fans.Length == 1) {
+                fan0Str := fans[1] "%"
+                fan1Str := "--%"
+                this.txtTemp.Text := Format("Temp: {} °C (Fan: {})", temp, fan0Str)
+            } else {
+                fan0Str := "--%"
+                fan1Str := "--%"
+                this.txtTemp.Text := Format("Temp: {} °C (Fans: EC Controlled)", temp)
+            }
 
             ; Clocks
             this.txtClocks.Text := Format("Clocks: Core {} MHz | Mem {} MHz", t["CoreClock"], t["MemoryClock"])
@@ -1914,16 +2097,22 @@ class NvControlGui {
             this.txtBandwidth.Text := Format("Mem Controller / BW: {} %", memBW)
 
             ; Fan & Thermal Group status
-            fanModeStr := this.Gpu.ManualFanActive ? "Manual Control" : "Auto (VBIOS Thermal Curve)"
             tTemp := this.Gpu.GetTargetTemp()
-            this.txtFanStatus.Text := Format("Status: {}  |  Speeds: Fan 0: {}, Fan 1: {}  |  Target: {} °C", fanModeStr, fan0Str, fan1Str, tTemp)
+            if this.Gpu.FansSupported {
+                fanModeStr := this.Gpu.ManualFanActive ? "Manual Control" : "Auto (VBIOS Thermal Curve)"
+                this.txtFanStatus.Text := Format("Status: {}  |  Speeds: Fan 0: {}, Fan 1: {}  |  Target: {} °C", fanModeStr, fan0Str, fan1Str, tTemp)
+            } else {
+                this.txtFanStatus.Text := Format("Status: Managed by Laptop EC / System BIOS  |  Target: {} °C", tTemp)
+            }
 
             ; Update Taskbar Widget
             if this.Widget
                 this.Widget.Update(t)
 
             ; Update Tray Tooltip
-            A_IconTip := Format("RTX 3090: {}°C | {}% Load | {:.0f}W / {:.0f}W", temp, gpuLoad, pwrDraw, pwrLimit)
+            shortName := RegExReplace(this.Gpu.Name, "i)NVIDIA\s+(GeForce\s+)?", "")
+            pwrTip := (pwrLimit > 0) ? Format("{:.0f}W / {:.0f}W", pwrDraw, pwrLimit) : Format("{:.0f}W", pwrDraw)
+            A_IconTip := Format("{}: {}°C | {}% Load | {}", shortName, temp, gpuLoad, pwrTip)
 
             ; Periodic memory trim every 60 seconds
             static pollCount := 0
@@ -2039,7 +2228,8 @@ Main() {
     EnsureAdmin()
 
     try {
-        gpu := NvmlDevice(0)
+        deviceIdx := NvmlDevice.FindFirstAvailableDevice()
+        gpu := NvmlDevice(deviceIdx)
     } catch as initErr {
         MsgBox("Unable to initialize NVIDIA Management Library (NVML):`n`n" initErr.Message, "NVcontrol - Error", "Iconx")
         InstanceManager.Close()

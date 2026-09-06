@@ -134,12 +134,24 @@ AutoHotkey64.exe NVcontrol.ahk /minimized
 
 ---
 
-## System Requirements
+## System Requirements & Hardware Compatibility
 
-* **OS**: Windows 10 or Windows 11 (64-bit)
-* **GPU**: NVIDIA GeForce GTX/RTX graphics card with standard display drivers installed (tested extensively on RTX 3090; compatible with Turing, Ampere, Ada Lovelace / RTX 20/30/40 series).
-* **Runtime**: [AutoHotkey v2.0+](https://www.autohotkey.com/) (64-bit)
-* **Permissions**: Administrator rights are required by NVIDIA's display driver to modify power limits and clock offsets. The script will automatically request elevation via UAC prompt on launch if not already elevated.
+* **OS**: Windows 10 or Windows 11 (64-bit).
+* **GPU**: NVIDIA GeForce GTX/RTX dedicated graphics card (Turing, Ampere, Ada Lovelace / RTX 20, 30, 40 series and newer).
+* **Runtime**: [AutoHotkey v2.0+](https://www.autohotkey.com/) (64-bit).
+* **Permissions**: Administrator rights are required by NVIDIA's display driver to adjust power limits and clock offsets. The script automatically requests elevation via UAC prompt on launch if not already elevated.
+
+### Driver Compatibility
+* **Driver 555.85 or later (Recommended)**: Required for Core and Memory Clock Offset control via NVML.
+* **Driver 515 or later**: Required for fan override restoration (`nvmlDeviceSetDefaultFanSpeed_v2`).
+* **Driver 450 or later**: Full support for base telemetry, power monitoring, VRAM metrics, and load.
+* *Note*: NVcontrol dynamically probes driver symbols — running on older drivers will not crash the app, but unsupported controls will be cleanly disabled with an explanatory note.
+
+### Laptop & Optimus (Dual-GPU) Systems
+On laptops equipped with hybrid graphics (Intel/AMD integrated graphics + NVIDIA discrete GPU):
+* **Automatic Device Discovery**: NVcontrol automatically skips non-NVIDIA adapters and locks onto your active NVIDIA discrete GPU (e.g. RTX 3070 Laptop GPU).
+* **Fan Control (Embedded Controller)**: Most laptop manufacturers (ASUS, Lenovo, MSI, Dell, Razer, etc.) route cooling fans through the motherboard Embedded Controller (EC) rather than the GPU's onboard PWM controller. NVcontrol detects this and marks fans as EC-managed rather than attempting invalid driver overrides.
+* **Dynamic Boost / Locked TGP**: On mobile GPUs where total graphics power is dynamically balanced with the CPU via ACPI firmware, NVcontrol monitors live power draw in Watts while indicating that TGP is managed by Dynamic Boost.
 
 ---
 
