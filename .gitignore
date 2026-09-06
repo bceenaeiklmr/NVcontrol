@@ -1,0 +1,36 @@
+# Operating System files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Temporary, Log & Cache files
+*.tmp
+*.log
+*.bak
+*.cache
+
+# Runtime Session & Canary files
+*.canary
+session_active.canary
+
+# User Configuration & Hardware Profiles (preserve user local tuning)
+*.ini
+config.ini
+
+# AutoHotkey Compilation & Build artifacts
+build/
+dist/
+*.exe
+
+# IDE & Editor folders
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+# Development Backlog / Roadmap (private)
+ROADMAP.md
+roadmap.md
+[Rr]oadmap.md
