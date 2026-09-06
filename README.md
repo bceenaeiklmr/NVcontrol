@@ -12,6 +12,12 @@
 
 A clean, lightweight GPU utility written in **AutoHotkey v2**. It connects directly to the NVIDIA Management Library (`nvml.dll`) via in-memory Win32 calls to control power limits, fan speeds, and clock offsets — using **under ~3 MB of RAM** and featuring a live telemetry overlay docked directly inside your Windows taskbar.
 
+Movable taskbar GUI  
+<img width="719" height="57" alt="Screenshot 2026-09-06 180110" src="https://github.com/user-attachments/assets/4349fd07-41cb-490b-b54e-bdf4e8a291c7"/>  
+
+Main window for settings  
+<img width="654" height="731" alt="Screenshot 2026-09-06 175941" src="https://github.com/user-attachments/assets/99af883c-93b0-459e-9dc2-fae237c973db"/>
+
 ---
 
 ## Why I Built This
